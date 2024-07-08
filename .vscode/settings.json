@@ -1,0 +1,16 @@
+{
+    "ros.distro": "humble",
+    "python.autoComplete.extraPaths": [
+        "/workspaces/ros-node/install/py_pubsub/lib/python3.10/site-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages",
+        "/workspaces/ros-node/install/px4_msgs/local/lib/python3.10/dist-packages"
+
+    ],
+    "python.analysis.extraPaths": [
+        "/workspaces/ros-node/install/py_pubsub/lib/python3.10/site-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages",
+        "/workspaces/ros-node/install/px4_msgs/local/lib/python3.10/dist-packages"
+    ]
+}
