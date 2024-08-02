@@ -3,16 +3,82 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-from px4_msgs.msg import VehicleCommand, VehicleStatus, VehicleGlobalPosition
+from px4_msgs.msg import VehicleCommand, VehicleStatus, VehicleGlobalPosition, VehicleLocalPosition, OffboardControlMode, TrajectorySetpoint
 from std_msgs.msg import String
 
 from pysm import State, StateMachine, Event
 from queue import Queue
+from enum import Enum
+from .timer import Timer
+
+class OffboardManager(object):
+    class OBMState(Enum):
+           OFF = 1
+           ON = 2
+    class OBMMode(Enum):
+        POSITION = 1
+        VELOCITY = 2
+    class Position(object):
+        '''
+        METERS, NED
+        '''
+        def __init__(self):
+            self.x = 0
+            self.y = 0
+            self.z = 0
+    def __init__(self, offboard_mode_publisher, trajectory_publisher, enable_offboard_func):
+        self.state = self.OBMState.OFF
+        self.mode = self.OBMMode.POSITION
+        self.position = self.Position()
+
+        self.offboard_mode_publisher = offboard_mode_publisher
+        self.trajectory_publisher = trajectory_publisher
+        self.enable_offboard_func = enable_offboard_func
+
+        self.offboard_heartbeat = OffboardControlMode()
+        self.offboard_heartbeat.position=True
+
+        self.pos_init = False
+        self.timer = Timer()
+    
+    def set_mode(self, mode):
+        self.mode = mode
+
+    def set_position(self, x,y,z):
+        self.position.x = x
+        self.position.y = y
+        self.position.z = z
+        self.pos_init = True
+
+    def activate(self):
+        self.timer.time_remaining = 1
+        self.timer.function = self.enable_offboard_func
+        self.timer.enabled = True
+        self.state = self.OBMState.ON
+    
+    def deactivate(self):
+        self.state = self.OBMState.OFF
+        self.pos_init = False
+
+    def build_trajectory_setpoint(self):
+        if self.mode == self.OBMMode.POSITION and self.position != None:
+            sp = TrajectorySetpoint()
+            sp.position = [self.position.x, self.position.y, self.position.z]
+            return sp
+
+    def update(self):
+        if self.state == self.OBMState.ON:
+            if self.mode == self.OBMMode.POSITION and self.position != None:
+                # send the heartbeat
+                self.offboard_mode_publisher.publish(self.offboard_heartbeat)
+                self.trajectory_publisher.publish(self.build_trajectory_setpoint())
+
+
+           
 
 class PX4Demo(Node):
-
     def __init__(self):
-        ############################ R O S  S E T U P #################################
+        ####################### R O S  N O D E  S E T U P ############################
         super().__init__(node_name='px4_demo') #type: ignore
         # Configure QoS profile for publishing and subscribing
         qos_profile = QoSProfile(
@@ -23,12 +89,18 @@ class PX4Demo(Node):
         )
         self.vehicle_status_subscriber = self.create_subscription(VehicleStatus, "/fmu/out/vehicle_status", self.vehicle_status_callback, qos_profile)
         self.vehicle_global_pos_subscriber = self.create_subscription(VehicleGlobalPosition, "/fmu/out/vehicle_global_position", self.vehicle_global_pos_callback, qos_profile)
+        self.vehicle_local_pos_subscriber = self.create_subscription(VehicleLocalPosition, "/fmu/out/vehicle_local_position", self.vehicle_local_pos_callback, qos_profile)
+
         
         self.vehicle_command_publisher = self.create_publisher(VehicleCommand, "/fmu/in/vehicle_command", qos_profile)
+        self.vehicle_offboard_mode_publisher = self.create_publisher(OffboardControlMode, "/fmu/in/offboard_control_mode", qos_profile)
+        self.trajectory_setpoint_publisher = self.create_publisher(TrajectorySetpoint, "/fmu/in/trajectory_setpoint", qos_profile)
 
         exec_frequency = 20 # Hz
         timer_period = 1/exec_frequency  # seconds
         self.frame_timer = self.create_timer(timer_period, self.exec_frame)
+
+        self.offboard_manager = OffboardManager(self.vehicle_offboard_mode_publisher, self.trajectory_setpoint_publisher,self.enable_offboard_mode)
         ###############################################################################
 
         #################### P X 4  S T A T E  S T O R A G E ##########################
@@ -36,6 +108,10 @@ class PX4Demo(Node):
         self.lat = 0.00
         self.lon = 0.00
         self.alt = 0.00
+
+        self.x = 0.00
+        self.y = 0.00
+        self.z = 0.00
         ###############################################################################
 
         #################### S T A T E  M A C H I N E  S E T U P ######################
@@ -70,6 +146,15 @@ class PX4Demo(Node):
         # create the Land state
         self.landing_state = State('Land')
 
+        # create the Hold state
+        self.hold_state = State('Hold')
+        self.hold_state.handlers = {
+            'enter': self.hold_enter
+        }
+
+        # create the navigate state
+        self.navigate_state = State('Navigate')
+
         # create the state machine
         self.sm = StateMachine('sm')
         
@@ -79,12 +164,18 @@ class PX4Demo(Node):
         self.sm.add_state(self.arm_state)
         self.sm.add_state(self.takeoff_state)
         self.sm.add_state(self.landing_state)
+        self.sm.add_state(self.hold_state)
+        self.sm.add_state(self.navigate_state)
         
         # add the transitions
         self.sm.add_transition(self.init_state, self.disarm_state, events=['vehicle_status_init_event'])
         self.sm.add_transition(self.disarm_state, self.arm_state, events=['vehicle_armed_event'])
         self.sm.add_transition(self.arm_state, self.takeoff_state, events=['vehicle_takeoff_event'])
         self.sm.add_transition(self.takeoff_state, self.landing_state, events=['vehicle_begin_landing_event'])
+        self.sm.add_transition(self.takeoff_state, self.hold_state, events=['vehicle_hold_event'])
+        self.sm.add_transition(self.hold_state, self.navigate_state, events=["vehicle_begin_navigation_event"])
+        self.sm.add_transition(self.hold_state, self.landing_state, events=['vehicle_begin_landing_event'])
+        self.sm.add_transition(self.navigate_state, self.hold_state, events=['vehicle_hold_event'])
         self.sm.add_transition(self.landing_state, self.disarm_state, events=['vehicle_disarmed_event'])
 
         self.sm.initialize()
@@ -97,16 +188,25 @@ class PX4Demo(Node):
 
     def arm_enter(self, state, event):
         self.takeoff(5)
+
+    def hold_enter(self, state, event):
+        self.offboard_manager.set_position(float(10), float(10), float(-10))
+        self.offboard_manager.activate()
     ####################################################################################
 
     ########################### R O S  N O D E  M E T H O D S ##########################
     def exec_frame(self):
+        old_state = self.sm.state.name # type: ignore
+        new_state = old_state
         while not self.event_queue.empty():
             event = self.event_queue.get()
             self.get_logger().info(f"Got a {event.name}")
-            old = self.sm.state.name # type: ignore
             self.sm.dispatch(event)
-            self.get_logger().info(f"TRANSITIONED FROM: ({old}) ---> ({self.sm.state.name})") # type: ignore
+            new_state = self.sm.state.name # type: ignore
+            if old_state != new_state:
+                self.get_logger().info(f"TRANSITIONED FROM: ({old_state}) ---> ({new_state})") # type: ignore
+        
+        self.offboard_manager.update()
     
     def vehicle_status_callback(self, msg: VehicleStatus):
         
@@ -125,6 +225,10 @@ class PX4Demo(Node):
                     self.event_queue.put(Event("vehicle_takeoff_event"))
                 elif msg.nav_state == VehicleStatus.NAVIGATION_STATE_AUTO_LAND: # land
                     self.event_queue.put(Event("vehicle_begin_landing_event"))
+                elif msg.nav_state == VehicleStatus.NAVIGATION_STATE_AUTO_LOITER: # hold
+                    self.event_queue.put(Event("vehicle_hold_event"))
+                elif msg.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD: # offboard
+                    self.event_queue.put(Event("vehicle_offboard_event"))
         # self.get_logger().info("GOT A MESSAGE")
         self.prev_vehicle_status_msg = msg
     
@@ -132,6 +236,12 @@ class PX4Demo(Node):
         self.lat = msg.lat
         self.lon = msg.lon
         self.alt = msg.alt
+        # self.get_logger().info(f"Lat: {self.lat} Lon: {self.lon} Alt: {self.alt}")
+    
+    def vehicle_local_pos_callback(self, msg: VehicleLocalPosition):
+        self.x = msg.x
+        self.y = msg.y
+        self.z = msg.z
         # self.get_logger().info(f"Lat: {self.lat} Lon: {self.lon} Alt: {self.alt}")
     ###################################################################################
 
@@ -207,6 +317,13 @@ class PX4Demo(Node):
         self.vehicle_command_publisher.publish(msg)
 
         self.get_logger().info('Reposition command sent')
+    
+    def enable_offboard_mode(self):
+        msg = VehicleCommand()
+        msg.command = VehicleCommand.VEHICLE_CMD_DO_SET_MODE
+        msg.param1 = float(1) # magic number? 
+        msg.param2 = float(6) # PX4_CUSTOM_MAIN_MODE_OFFBOARD
+        self.send_vehicle_command(msg)
 
     def land(self):
         '''
