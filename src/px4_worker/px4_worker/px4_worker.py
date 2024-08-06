@@ -1,79 +1,17 @@
 import sys
+import math
+import time
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from px4_msgs.msg import VehicleCommand, VehicleStatus, VehicleGlobalPosition, VehicleLocalPosition, OffboardControlMode, TrajectorySetpoint
-from std_msgs.msg import String
-
+from threading import Thread
 from pysm import State, StateMachine, Event
 from queue import Queue
 from enum import Enum
 from .timer import Timer
-
-class OffboardManager(object):
-    class OBMState(Enum):
-           OFF = 1
-           ON = 2
-    class OBMMode(Enum):
-        POSITION = 1
-        VELOCITY = 2
-    class Position(object):
-        '''
-        METERS, NED
-        '''
-        def __init__(self):
-            self.x = 0
-            self.y = 0
-            self.z = 0
-    def __init__(self, offboard_mode_publisher, trajectory_publisher, enable_offboard_func):
-        self.state = self.OBMState.OFF
-        self.mode = self.OBMMode.POSITION
-        self.position = self.Position()
-
-        self.offboard_mode_publisher = offboard_mode_publisher
-        self.trajectory_publisher = trajectory_publisher
-        self.enable_offboard_func = enable_offboard_func
-
-        self.offboard_heartbeat = OffboardControlMode()
-        self.offboard_heartbeat.position=True
-
-        self.pos_init = False
-        self.timer = Timer()
-    
-    def set_mode(self, mode):
-        self.mode = mode
-
-    def set_position(self, x,y,z):
-        self.position.x = x
-        self.position.y = y
-        self.position.z = z
-        self.pos_init = True
-
-    def activate(self):
-        self.timer.time_remaining = 1
-        self.timer.function = self.enable_offboard_func
-        self.timer.enabled = True
-        self.state = self.OBMState.ON
-    
-    def deactivate(self):
-        self.state = self.OBMState.OFF
-        self.pos_init = False
-
-    def build_trajectory_setpoint(self):
-        if self.mode == self.OBMMode.POSITION and self.position != None:
-            sp = TrajectorySetpoint()
-            sp.position = [self.position.x, self.position.y, self.position.z]
-            return sp
-
-    def update(self):
-        if self.state == self.OBMState.ON:
-            if self.mode == self.OBMMode.POSITION and self.position != None:
-                # send the heartbeat
-                self.offboard_mode_publisher.publish(self.offboard_heartbeat)
-                self.trajectory_publisher.publish(self.build_trajectory_setpoint())
-
-
+from .server import SimpleWebPage
            
 
 class PX4Demo(Node):
@@ -100,7 +38,7 @@ class PX4Demo(Node):
         timer_period = 1/exec_frequency  # seconds
         self.frame_timer = self.create_timer(timer_period, self.exec_frame)
 
-        self.offboard_manager = OffboardManager(self.vehicle_offboard_mode_publisher, self.trajectory_setpoint_publisher,self.enable_offboard_mode)
+        # self.offboard_manager = OffboardManager(self.vehicle_offboard_mode_publisher, self.trajectory_setpoint_publisher,self.enable_offboard_mode)
         ###############################################################################
 
         #################### P X 4  S T A T E  S T O R A G E ##########################
@@ -112,6 +50,21 @@ class PX4Demo(Node):
         self.x = 0.00
         self.y = 0.00
         self.z = 0.00
+
+        self.heading = 0.00
+
+        self.offboard_heartbeat = OffboardControlMode()
+        self.offboard_heartbeat.position=True
+
+        self.offboard_heartbeat_thread = Thread(target=self.send_offboard_heartbeat, args=())
+        self.offboard_heartbeat_thread.daemon = True
+        self.offboard_heartbeat_thread_run_flag = True
+
+        self.offboard_timer = Timer()
+        self.offboard_timer.time_remaining = 1
+        self.offboard_timer.function = self.enable_offboard_mode
+
+
         ###############################################################################
 
         #################### S T A T E  M A C H I N E  S E T U P ######################
@@ -153,7 +106,17 @@ class PX4Demo(Node):
         }
 
         # create the navigate state
-        self.navigate_state = State('Navigate')
+        self.navigate_state = State('Navigate') 
+        self.navigate_state.handlers = {
+            'up_event':  lambda state, event: self.fly_up(1), 
+            'down_event': lambda state, event: self.fly_down(1),
+            'right_event': lambda state, event: self.fly_right(1),
+            'left_event': lambda state, event: self.fly_left(1),
+            'forward_event': lambda state, event: self.fly_forward(1),
+            'backward_event': lambda state, event: self.fly_backward(1),
+            'yaw_left_event': lambda state, event: self.yaw_left(90),
+            'yaw_right_event': lambda state, event: self.yaw_right(90)
+        }
 
         # create the state machine
         self.sm = StateMachine('sm')
@@ -181,6 +144,11 @@ class PX4Demo(Node):
         self.sm.initialize()
         ###############################################################################
 
+        self.web_server = SimpleWebPage(self.event_queue)
+        self.server_thread = Thread(target=self.web_server.run)
+        self.server_thread.daemon = True
+        self.server_thread.start()
+
         
     #################### S T A T E  M A C H I N E  M E T H O D S ######################
     def disarm_enter(self, state, event):
@@ -190,8 +158,10 @@ class PX4Demo(Node):
         self.takeoff(5)
 
     def hold_enter(self, state, event):
-        self.offboard_manager.set_position(float(10), float(10), float(-10))
-        self.offboard_manager.activate()
+        self.offboard_heartbeat_thread.start()
+        self.send_trajectory_setpoint_position(0,0,0)
+        self.offboard_timer.start()
+        self.event_queue.put(Event("vehicle_begin_navigation_event"))
     ####################################################################################
 
     ########################### R O S  N O D E  M E T H O D S ##########################
@@ -205,8 +175,7 @@ class PX4Demo(Node):
             new_state = self.sm.state.name # type: ignore
             if old_state != new_state:
                 self.get_logger().info(f"TRANSITIONED FROM: ({old_state}) ---> ({new_state})") # type: ignore
-        
-        self.offboard_manager.update()
+
     
     def vehicle_status_callback(self, msg: VehicleStatus):
         
@@ -242,12 +211,16 @@ class PX4Demo(Node):
         self.x = msg.x
         self.y = msg.y
         self.z = msg.z
+        self.heading = msg.heading
         # self.get_logger().info(f"Lat: {self.lat} Lon: {self.lon} Alt: {self.alt}")
     ###################################################################################
 
     ########################### P X 4  R O S  M E T H O D S ###########################
+    def get_timestamp(self):
+        return int(self.get_clock().now().nanoseconds / 1000)
+
     def send_vehicle_command(self, msg: VehicleCommand):
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        msg.timestamp = self.get_timestamp()
         
         # if the msg has a bunch of defaults set, set them to our defaults
         if all([
@@ -324,6 +297,66 @@ class PX4Demo(Node):
         msg.param1 = float(1) # magic number? 
         msg.param2 = float(6) # PX4_CUSTOM_MAIN_MODE_OFFBOARD
         self.send_vehicle_command(msg)
+    
+    def send_offboard_heartbeat(self):
+        while self.offboard_heartbeat_thread_run_flag == True:
+            self.vehicle_offboard_mode_publisher.publish(self.offboard_heartbeat)
+            time.sleep(1/20)
+
+    def send_trajectory_setpoint_position(self, x, y , z, yaw = None):
+        msg = TrajectorySetpoint()
+        msg.timestamp = self.get_timestamp()
+        msg.position = [float(x), float(y) , float(z)]
+        if yaw == None:
+            yaw=self.heading
+        msg.yaw = yaw
+        self.trajectory_setpoint_publisher.publish(msg)
+
+    def send_trajectory_setpoint_velocity(self, vx, vy , vz):
+        msg = TrajectorySetpoint()
+        msg.velocity = [float(vx), float(vy) , float(vz)]
+        self.trajectory_setpoint_publisher.publish(msg)
+
+    def fly_forward(self, distance):
+
+        new_x = distance * math.cos(self.heading) + self.x
+        new_y = distance * math.sin(self.heading) + self.y
+        
+        self.send_trajectory_setpoint_position(new_x, new_y, self.z)
+    
+    def fly_backward(self, distance):
+        new_x = distance * math.cos(self.heading + math.pi) + self.x
+        new_y = distance * math.sin(self.heading + math.pi) + self.y
+        
+        self.send_trajectory_setpoint_position(new_x, new_y, self.z)
+    
+    def fly_right(self, distance):
+        new_x = distance * math.cos(self.heading + (math.pi/2)) + self.x
+        new_y = distance * math.sin(self.heading + (math.pi/2)) + self.y
+        
+        self.send_trajectory_setpoint_position(new_x, new_y, self.z)
+    
+    def fly_left(self, distance):
+        new_x = distance * math.cos(self.heading + (-1 * math.pi/2)) + self.x
+        new_y = distance * math.sin(self.heading + (-1 * math.pi/2)) + self.y
+        
+        self.send_trajectory_setpoint_position(new_x, new_y, self.z)
+    
+    def fly_up(self, distance):
+        z_pos = self.z + -1*distance
+        self.send_trajectory_setpoint_position(self.x, self.y, z_pos)
+    
+    def fly_down(self, distance):
+        z_pos = self.z + distance
+        self.send_trajectory_setpoint_position(self.x, self.y, z_pos)
+
+    def yaw_left(self, angle):
+        hdg = self.heading - math.radians(angle)
+        self.send_trajectory_setpoint_position(self.x, self.y, self.z, hdg)
+
+    def yaw_right(self, angle):
+        hdg = self.heading + math.radians(angle)
+        self.send_trajectory_setpoint_position(self.x, self.y, self.z, hdg)
 
     def land(self):
         '''
