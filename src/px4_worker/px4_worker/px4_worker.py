@@ -85,12 +85,15 @@ class PX4Demo(Node):
         self.disarm_state = State('Disarm')
         self.disarm_state.handlers = {
             'enter': self.disarm_enter,
+            'arm_event': self.handle_arm_request_event
         }
         
         # create the Arm state
         self.arm_state = State('Arm')
         self.arm_state.handlers = {
             'enter': self.arm_enter,
+            'disarm_event': self.handle_disarm_request_event,
+            'takeoff_requested_event':self.handle_takeoff_request_event
         }
         
         # create the Takeoff state
@@ -152,16 +155,27 @@ class PX4Demo(Node):
         
     #################### S T A T E  M A C H I N E  M E T H O D S ######################
     def disarm_enter(self, state, event):
-        self.arm()
+        # self.arm()
+        pass
 
     def arm_enter(self, state, event):
-        self.takeoff(5)
+        # self.takeoff(5)
+        pass
 
     def hold_enter(self, state, event):
         self.offboard_heartbeat_thread.start()
         self.send_trajectory_setpoint_position(0,0,0)
         self.offboard_timer.start()
         self.event_queue.put(Event("vehicle_begin_navigation_event"))
+    
+    def handle_arm_request_event(self, state, event):
+        self.arm()
+    
+    def handle_disarm_request_event(self, state, event):
+        self.disarm()
+    
+    def handle_takeoff_request_event(self, state: State, event: Event):
+        self.takeoff(event.cargo["altitude"])
     ####################################################################################
 
     ########################### R O S  N O D E  M E T H O D S ##########################
