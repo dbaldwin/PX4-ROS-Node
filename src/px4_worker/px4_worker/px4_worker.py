@@ -118,7 +118,8 @@ class PX4Demo(Node):
             'forward_event': lambda state, event: self.fly_forward(1),
             'backward_event': lambda state, event: self.fly_backward(1),
             'yaw_left_event': lambda state, event: self.yaw_left(90),
-            'yaw_right_event': lambda state, event: self.yaw_right(90)
+            'yaw_right_event': lambda state, event: self.yaw_right(90),
+            'land_event': lambda state, event: self.land()
         }
 
         # create the state machine

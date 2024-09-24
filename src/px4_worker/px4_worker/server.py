@@ -44,6 +44,7 @@ class SimpleWebPage:
                         <!-- Text input and button for submission -->
                         <input type="text" id="altitude" placeholder="Altitude">
                         <button onclick="submitText()">Takeoff</button>
+                        <button onclick="sendCommand('land')">Land</button>
                     </div>
 
                     <script>
@@ -95,6 +96,8 @@ class SimpleWebPage:
                 self.event_queue.put(Event("arm_event"))
             elif cmd == 'disarm':
                 self.event_queue.put(Event("disarm_event"))
+            elif cmd == 'land':
+                self.event_queue.put(Event("land_event"))
 
             # print(f"Command received: {cmd}")
             return f"Command {cmd} executed"
