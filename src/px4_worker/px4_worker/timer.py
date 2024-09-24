@@ -4,6 +4,7 @@ import time
 
 class Timer(object):
     def __init__(self):
+        self.init_duration = 0
         self.duration = 0
         self.enabled = False
         self.function: Any = None
