@@ -58,10 +58,11 @@ class PX4Demo(Node):
 
         self.offboard_heartbeat_thread = Thread(target=self.send_offboard_heartbeat, args=())
         self.offboard_heartbeat_thread.daemon = True
-        self.offboard_heartbeat_thread_run_flag = True
+        self.offboard_heartbeat_thread_run_flag = False
+        self.offboard_heartbeat_thread.start()
 
         self.offboard_timer = Timer()
-        self.offboard_timer.time_remaining = 1
+        self.offboard_timer.set_timeout(1)
         self.offboard_timer.function = self.enable_offboard_mode
 
 
@@ -143,6 +144,7 @@ class PX4Demo(Node):
         self.sm.add_transition(self.hold_state, self.navigate_state, events=["vehicle_begin_navigation_event"])
         self.sm.add_transition(self.hold_state, self.landing_state, events=['vehicle_begin_landing_event'])
         self.sm.add_transition(self.navigate_state, self.hold_state, events=['vehicle_hold_event'])
+        self.sm.add_transition(self.navigate_state, self.landing_state, events=['vehicle_begin_landing_event'])
         self.sm.add_transition(self.landing_state, self.disarm_state, events=['vehicle_disarmed_event'])
 
         self.sm.initialize()
@@ -156,15 +158,15 @@ class PX4Demo(Node):
         
     #################### S T A T E  M A C H I N E  M E T H O D S ######################
     def disarm_enter(self, state, event):
-        # self.arm()
-        pass
+        self.offboard_heartbeat_thread_run_flag = False
+        self.enable_hold_mode()
 
     def arm_enter(self, state, event):
         # self.takeoff(5)
         pass
 
     def hold_enter(self, state, event):
-        self.offboard_heartbeat_thread.start()
+        self.offboard_heartbeat_thread_run_flag = True
         self.send_trajectory_setpoint_position(0,0,0)
         self.offboard_timer.start()
         self.event_queue.put(Event("vehicle_begin_navigation_event"))
@@ -313,9 +315,18 @@ class PX4Demo(Node):
         msg.param2 = float(6) # PX4_CUSTOM_MAIN_MODE_OFFBOARD
         self.send_vehicle_command(msg)
     
+    def enable_hold_mode(self):
+        msg = VehicleCommand()
+        msg.command = VehicleCommand.VEHICLE_CMD_DO_SET_MODE
+        msg.param1 = float(1) # magic number? 
+        msg.param2 = float(4) # PX4_CUSTOM_MAIN_MODE_AUTO
+        msg.param3 = float(3)
+        self.send_vehicle_command(msg)
+
     def send_offboard_heartbeat(self):
-        while self.offboard_heartbeat_thread_run_flag == True:
-            self.vehicle_offboard_mode_publisher.publish(self.offboard_heartbeat)
+        while True:
+            if self.offboard_heartbeat_thread_run_flag == True:
+                self.vehicle_offboard_mode_publisher.publish(self.offboard_heartbeat)
             time.sleep(1/20)
 
     def send_trajectory_setpoint_position(self, x, y , z, yaw = None):
