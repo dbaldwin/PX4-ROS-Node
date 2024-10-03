@@ -201,7 +201,7 @@ class PX4Demo(Node):
         else:
             #check arming
             if self.prev_vehicle_status_msg.arming_state != msg.arming_state:
-                if msg.arming_state == VehicleStatus.ARMING_STATE_STANDBY: #disarmed
+                if msg.arming_state == VehicleStatus.ARMING_STATE_DISARMED: #disarmed
                     self.event_queue.put(Event("vehicle_disarmed_event"))
                 elif msg.arming_state == VehicleStatus.ARMING_STATE_ARMED: # armed
                     self.event_queue.put(Event("vehicle_armed_event"))
