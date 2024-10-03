@@ -319,8 +319,9 @@ class PX4Demo(Node):
         msg = VehicleCommand()
         msg.command = VehicleCommand.VEHICLE_CMD_DO_SET_MODE
         msg.param1 = float(1) # magic number? 
-        msg.param2 = float(4) # PX4_CUSTOM_MAIN_MODE_AUTO
-        msg.param3 = float(3)
+        msg.param2 = float(3) # PX4_CUSTOM_MAIN_MODE_POSCTL
+        #msg.param2 = float(4) # PX4_CUSTOM_MAIN_MODE_AUTO
+        # msg.param3 = float(3)
         self.send_vehicle_command(msg)
 
     def send_offboard_heartbeat(self):
